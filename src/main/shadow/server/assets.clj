@@ -6,71 +6,66 @@
             [clojure.data.json :as json]
             [clojure.java.io :as io]))
 
-(defn css-path [{:keys [state] :as assets} file-id]
-  (if-let [path (get-in @state [:css-files file-id :path])]
-    path
-    (throw (ex-info "no css file by id" {:file-id file-id :css-files (:css-files @state)}))))
+
 
 (defn load-manifest
-  [{:keys [js-root js-manifest
-           css-root css-manifest
+  [{:keys [js-manifest
+           css-manifest
            state] :as assets}]
+
+  (prn [:loading-manifest])
   (let [now
         (System/currentTimeMillis)
 
-        js-root-fs
-        (-> (io/file js-manifest)
-            (.getParentFile))
+        js-manifest-file
+        (io/file js-manifest)
 
-        js-pack
-        (->> (json/read-str (slurp js-manifest) :key-fn keyword)
-             (map (fn [{:keys [js-name] :as mod}]
-                    (let [js-file (io/file js-root-fs js-name)]
-                      (assoc mod
-                        :js-path (str js-root "/" js-name)
-                        :last-modified (.lastModified js-file)))))
-             (into []))
+        js-modules
+        (if-not (.exists js-manifest-file)
+          []
+          (-> js-manifest-file
+              (slurp)
+              (json/read-str :key-fn keyword)))
 
-        order
-        (->> js-pack
-             (map (fn [{:keys [name js-path depends-on]}]
-                    {:name name :js-path js-path :depends-on (or depends-on [])}))
-             (into []))
-
-        modules
-        (reduce (fn [modules {:keys [name] :as mod}]
-                  (assoc modules name mod))
-          {}
-          js-pack)
-
-        css-root-fs
-        (-> (io/file css-manifest)
-            (.getParentFile))
+        css-manifest-file
+        (io/file css-manifest)
 
         css-files
-        (->> (json/read-str (slurp css-manifest))
-             (reduce-kv (fn [x k v]
-                          (let [css-file (io/file css-root-fs v)]
-                            (assoc x k {:name k
-                                        :path (str css-root "/" v)
-                                        :last-modified (.lastModified css-file)})))
-               {}))]
+        (if-not (.exists css-manifest-file)
+          {}
+          (-> css-manifest-file
+              (slurp)
+              (json/read-str)))]
 
-    (reset! state {:order order
-                   :modules modules
+    (reset! state {:js-modules js-modules
                    :css-files css-files
+
+                   :js-timestamp
+                   (when (.exists js-manifest-file)
+                     (.lastModified js-manifest-file))
+
+                   :css-timestamp
+                   (when (.exists css-manifest-file)
+                     (.lastModified css-manifest-file))
+
                    :loaded-at now})
 
     assets))
 
 (defn ^String html-head
   "returns a string to be included in the html <head> of your page"
-  [{:keys [package-name] :as env} css-files]
-  (html
-    (for [file-id css-files
-          :when file-id]
-      [:link {:href (css-path env file-id) :rel "stylesheet" :data-css-module file-id :data-css-package package-name}])
-    [:script {:type "text/javascript"} "var _sqs = new Date().getTime();"]))
+  [{:keys [css-root package-name state] :as env} files-to-include]
+  (let [{:keys [css-files]} @state]
+
+    (html
+      (for [file-id files-to-include
+            :when file-id
+            :let [filename
+                  (if-let [filename (get css-files file-id)]
+                    filename
+                    (throw (ex-info "no css file by id" {:file-id file-id :css-files css-files})))]]
+
+        [:link {:href (str css-root "/" filename) :rel "stylesheet" :data-css-module file-id :data-css-package package-name}]))))
 
 (def known-dom-refs
   #{:none
@@ -91,51 +86,87 @@
            (when args
              (pr-str args))])))
 
-(defn ^String html-body
-  "returns a string to be included in the html just before </body>"
-  [{:keys [state] :as assets} mods]
-  (let [{:keys [order modules]} @state
-        mods (set mods)]
-    (when-not (every? #(contains? modules %) mods)
-      (throw (ex-info "invalid js module, not defined in manifest" {:known (keys modules)
-                                                                    :requested mods})))
+(defn ^String html-js-preload
+  "returns a string to be included in the html head as close to the top as possible
+
+   emits <link rel='preload' as='script'> elements"
+  [{:keys [js-root state] :as assets} mods]
+  (let [{:keys [js-modules]}
+        @state
+
+        mods-to-link
+        (into #{} mods)]
 
     (html
-      (let [mods-to-load (reduce (fn [load {:keys [name] :as mod}]
-                                   (if (contains? mods name)
-                                     (conj load mod)
-                                     load))
-                           []
-                           order)]
-        (for [mod mods-to-load]
-          [:script (cond-> {:type "text/javascript"
-                            :src (:js-path mod)}
-                     ;; FIXME: async might cause issues?
-                     (= 0 (count mods-to-load))
-                     (assoc :async true))]))
+      (for [{:keys [name js-name foreign] :as js-mod} js-modules
+            :when (contains? mods-to-link name)]
+        (html
+          (when (seq foreign)
+            (for [foreign-lib foreign]
+              [:link {:rel "preload"
+                      :as "script"
+                      :href (str js-root "/" (:js-name foreign-lib))}]))
+
+          [:link {:rel "preload"
+                  :as "script"
+                  :href (str js-root "/" js-name)}]))
       )))
 
-(defn last-modified-set [files]
-  (set (map #(.lastModified ^File %) files)))
+(defn ^String html-body
+  "returns a string to be included in the html just before </body>"
+  [{:keys [js-root state] :as assets} mods-to-load]
+  (let [{:keys [js-modules]}
+        @state
+
+        mods-to-load
+        (into #{} mods-to-load)]
+
+    (html
+      (for [{:keys [name js-name foreign] :as mod} js-modules
+            :when (contains? mods-to-load name)]
+        (html
+          (when (seq foreign)
+            (for [foreign-lib foreign]
+              [:script {:type "text/javascript" :src (str js-root "/" (:js-name foreign-lib))}]))
+
+          [:script {:type "text/javascript"
+                    :src (str js-root "/" js-name)}]))
+      )))
 
 (defn watch-thread-fn
-  [{:keys [keep-running css-manifest js-manifest] :as assets}]
-  (let [files (vector (io/file css-manifest)
-                (io/file js-manifest))]
+  [{:keys [keep-running css-manifest js-manifest state] :as assets}]
+  (let [css-manifest-fs
+        (io/file css-manifest)
+
+        js-manifest-fs
+        (io/file js-manifest)]
 
     (try
-      (loop [last-mod (last-modified-set files)]
+      (loop []
         (if (or (not @keep-running)
                 (.isInterrupted (Thread/currentThread)))
           false ;; just exit
           (do (Thread/sleep 500)
-              (let [new-mod (last-modified-set files)]
-                (if (not= last-mod new-mod)
-                  (do (load-manifest assets)
-                      (recur new-mod))
-                  ;; no mod
-                  (recur last-mod)
-                  )))))
+              (let [css-mod
+                    (when (.exists css-manifest-fs)
+                      (.lastModified css-manifest-fs))
+
+                    js-mod
+                    (when (.exists js-manifest-fs)
+                      (.lastModified js-manifest-fs))
+
+                    {:keys [css-timestamp
+                            js-timestamp]}
+                    @state]
+
+                (when (or (not= js-mod js-timestamp)
+                          (not= css-mod css-timestamp))
+
+                  ;; reload manifest if either changes
+                  ;; FIXME: seperate js/css manifests?
+                  (load-manifest assets))
+
+                (recur)))))
       (catch InterruptedException e
         false))))
 
