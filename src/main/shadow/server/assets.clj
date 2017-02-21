@@ -6,14 +6,11 @@
             [clojure.data.json :as json]
             [clojure.java.io :as io]))
 
-
-
 (defn load-manifest
   [{:keys [js-manifest
            css-manifest
            state] :as assets}]
 
-  (prn [:loading-manifest])
   (let [now
         (System/currentTimeMillis)
 

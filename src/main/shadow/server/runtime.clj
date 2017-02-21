@@ -3,6 +3,14 @@
             [loom.alg :as la]
             [clojure.string :as str]))
 
+(defn- rt-state? [x]
+  (and (map? x) (map? (::app x))))
+
+(defn init [state app]
+  {:pre [(map? state)
+         (map? app)]}
+  (assoc state ::app app))
+
 ;; util
 
 (defn app->graph [app]
@@ -16,8 +24,8 @@
                (if (not (seq depends-on))
                  (conj result id)
                  result))
-             []
-             app))
+    []
+    app))
 
 ;; stopping
 
@@ -32,70 +40,96 @@
     ;; not present, do nothing
     state))
 
-(defn stop-all [state app]
+(defn stop-all
+  [{::keys [app] :as state}]
+  {:pre [(rt-state? state)]}
   (let [stop-order (-> app app->graph la/topsort)
         stop-order (concat stop-order (services-without-deps app))]
     (reduce (partial stop-service app) state stop-order)
     ))
 
-(defn stop-single [state app service]
+(defn stop-single
+  [{::keys [app] :as state} service]
+  {:pre [(rt-state? state)]}
   (stop-service app state service))
+
+(defn stop-many
+  [state services]
+  (reduce stop-single state services))
 
 ;; starting
 
-(defn- start-service [app state service-id]
+(defn- start-one
+  [{::keys [app] :as state} service-id]
   ;; already present, assume its started
   (if (contains? state service-id)
     state
     ;; lookup up definition, get deps (assumes deps are already started), start
     (if-let [{:keys [depends-on start] :as service-def} (get app service-id)]
-      (let [deps (map #(get state %) depends-on)
-            service-instance (try
-                               (apply start deps)
-                               (catch Exception e
-                                 ;; stop services we attempted to start, hope that that works
-                                 (reduce (partial stop-service app)
-                                         state
-                                         (->> (::started state)
-                                              (reverse)))
-                                 (throw (ex-info "failed to start service"
-                                                 {:service service-id
-                                                  :service-def service-def}
-                                                 e))))]
+      (let [deps
+            (map #(get state %) depends-on)
 
-        (-> state
-            (assoc service-id service-instance)
-            (update-in [::started] conj service-id)))
+            service-instance
+            (apply start deps)]
+
+        (assoc state service-id service-instance))
       ;; not defined
       (throw (ex-info (format "cannot start/find undefined service %s (%s)" service-id (str/join "," (keys state))) {:service service-id :provided (keys state)}))
       )))
 
+(defn- start-many
+  "start services and return updated state
+   will attempt to stop all if one startup fails"
+  [state services]
+  {:keys [(rt-state? state)]}
+  (loop [state
+         state
+
+         start
+         services
+
+         started
+         []]
+
+    (let [service-id (first start)]
+      (if (nil? service-id)
+        ;; nothing left to start
+        state
+
+        ;; start next service
+        (let [state
+              (try
+                (start-one state service-id)
+                (catch Exception e
+                  ;; FIXME: ignores an exception if a rollback fails
+                  (try
+                    (stop-many state started)
+                    (catch Exception x
+                      (prn [:failed-to-rollback started x])))
+
+                  (throw (ex-info "failed to start service" {:id service-id} e))))]
+          (recur state (rest start) (conj started service-id)))
+        ))))
+
 (defn start-all
-  "start all services in dependency order"
-  [state app]
+  "start all services in dependency order, will attempt to properly shutdown if once service fails to start"
+  [{::keys [app] :as state}]
+  {:pre [(rt-state? state)]}
   (let [start-order (-> app app->graph la/topsort reverse)
         start-order (concat start-order (services-without-deps app))]
-    (-> (reduce (partial start-service app)
-                (assoc state
-                  ::started [])
-                start-order)
-        (dissoc ::started))))
+    (start-many state start-order)
+    ))
 
 (defn start-single
   "start a single service (and its deps)"
-  [state app service]
+  [{::keys [app] :as state} service]
+  {:pre [(rt-state? state)]}
   (let [start-order (-> app app->graph (la/topsort service) reverse)]
-    (-> (reduce (partial start-service app)
-                (assoc state
-                  ::started [])
-                start-order)
-        (dissoc ::started))))
+    (start-many state start-order)))
 
 (defn start-services
-  "start a subset of services (and their deps)"
-  [state app services]
-  (reduce (fn [state service-id]
-            (start-single state app service-id))
-          state
-          services))
+  "start a multiple services (and their deps)"
+  [state services]
+  {:pre [(rt-state? state)]}
+  (reduce start-single state services))
 
