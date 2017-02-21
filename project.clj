@@ -1,4 +1,4 @@
-(defproject thheller/shadow-util "0.2.0"
+(defproject thheller/shadow-util "0.3.0"
   :description "FIXME: write description"
   :url "http://example.com/FIXME"
 
