@@ -29,9 +29,11 @@
 
 ;; stopping
 
-(defn- stop-service [app state service-id]
+(defn- stop-service
+  [{::keys [app] :as state} service-id]
   (if-let [service (get state service-id)]
-    (if-let [{:keys [stop] :as service-def} (get app service-id)]
+    (if-let [{:keys [stop] :as service-def}
+             (get app service-id)]
       (do (when stop
             (stop service))
           (dissoc state service-id))
@@ -45,13 +47,13 @@
   {:pre [(rt-state? state)]}
   (let [stop-order (-> app app->graph la/topsort)
         stop-order (concat stop-order (services-without-deps app))]
-    (reduce (partial stop-service app) state stop-order)
+    (reduce stop-service state stop-order)
     ))
 
 (defn stop-single
-  [{::keys [app] :as state} service]
+  [state service]
   {:pre [(rt-state? state)]}
-  (stop-service app state service))
+  (stop-service state service))
 
 (defn stop-many
   [state services]
