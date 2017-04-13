@@ -1,7 +1,5 @@
-(ns shadow.server.runtime
-  (:require [loom.graph :as lg]
-            [loom.alg :as la]
-            [clojure.string :as str]))
+(ns shadow.runtime.services
+  (:require [clojure.string :as str]))
 
 (defn- rt-state? [x]
   (and (map? x) (map? (::app x))))
@@ -13,19 +11,48 @@
 
 ;; util
 
-(defn app->graph [app]
-  (let [edges (for [[id {:keys [depends-on]}] app
-                    dep depends-on]
-                [id dep])]
-    (apply lg/digraph edges)))
+(defn topo-sort-services*
+  [{:keys [services deps visited] :as state} name]
+  (let [{:keys [depends-on] :as mod}
+        (get services name)]
+    (cond
+      ;; undefined service dependency is ok, assuming it is provided
+      (nil? mod)
+      state
 
-(defn services-without-deps [app]
-  (reduce-kv (fn [result id {:keys [depends-on]}]
-               (if (not (seq depends-on))
-                 (conj result id)
-                 result))
-    []
-    app))
+      (contains? deps name)
+      (throw (ex-info "service circular dependeny" {:deps deps :name name}))
+
+      (contains? visited name)
+      state
+
+      :else
+      (-> state
+          (update :visited conj name)
+          (update :deps conj name)
+          (as-> state
+            (reduce topo-sort-services* state depends-on))
+          (update :deps disj name)
+          (update :order conj name)))))
+
+(defn topo-sort-services
+  ([services]
+    (topo-sort-services services (keys services)))
+  ([services sort-keys]
+   (let [{:keys [deps visited order] :as result}
+         (reduce
+           topo-sort-services*
+           {:deps #{}
+            :visited #{}
+            :order []
+            :services services}
+           sort-keys)]
+
+     (assert (empty? deps))
+     (assert (= (count visited) (count services)))
+
+     order
+     )))
 
 ;; stopping
 
@@ -45,8 +72,7 @@
 (defn stop-all
   [{::keys [app] :as state}]
   {:pre [(rt-state? state)]}
-  (let [stop-order (-> app app->graph la/topsort)
-        stop-order (concat stop-order (services-without-deps app))]
+  (let [stop-order (-> (topo-sort-services app) (reverse))]
     (reduce stop-service state stop-order)
     ))
 
@@ -117,8 +143,7 @@
   "start all services in dependency order, will attempt to properly shutdown if once service fails to start"
   [{::keys [app] :as state}]
   {:pre [(rt-state? state)]}
-  (let [start-order (-> app app->graph la/topsort reverse)
-        start-order (concat start-order (services-without-deps app))]
+  (let [start-order (topo-sort-services app)]
     (start-many state start-order)
     ))
 
@@ -126,7 +151,7 @@
   "start a single service (and its deps)"
   [{::keys [app] :as state} service]
   {:pre [(rt-state? state)]}
-  (let [start-order (-> app app->graph (la/topsort service) reverse)]
+  (let [start-order (topo-sort-services app [service])]
     (start-many state start-order)))
 
 (defn start-services

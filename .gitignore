@@ -4,6 +4,7 @@
 /checkouts
 pom.xml
 pom.xml.asc
+.DS_Store
 *.iml
 *.jar
 *.class
