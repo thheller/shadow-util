@@ -48,9 +48,6 @@
             :services services}
            sort-keys)]
 
-     (assert (empty? deps))
-     (assert (= (count visited) (count services)))
-
      order
      )))
 
